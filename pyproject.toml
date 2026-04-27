@@ -1,0 +1,21 @@
+[project]
+name = "gmail-mcp"
+version = "0.1.0"
+description = "Minimal MCP server that sends Gmail messages via SMTP + App Password."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Nikita Chuchelov", email = "chucheloff@gmail.com" }]
+dependencies = [
+    "fastmcp>=2.3.0",
+]
+
+[project.scripts]
+gmail-mcp = "gmail_mcp.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gmail_mcp"]

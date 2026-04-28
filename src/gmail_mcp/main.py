@@ -1,45 +1,30 @@
-"""Gmail MCP server.
+"""gmail-mcp — minimal MCP server that delivers email for an LLM agent.
 
-Exposes a minimal MCP HTTP service backed by Gmail SMTP and a Google App
-Password. Designed for the JobSearcherBot pipeline: an LLM agent calls
-``send_email`` to deliver job briefings to the operator's inbox.
+Despite the name, the server supports multiple backends:
 
-Environment variables:
+- ``smtp``   — Gmail SMTP via App Password. Fails on hosts that block egress 25/465/587 (most cloud providers).
+- ``resend`` — Resend HTTP API (port 443). Recommended for cloud deployments.
 
-- ``GMAIL_USER``           — Gmail address used as sender (required).
-- ``GMAIL_APP_PASSWORD``   — 16-character Google App Password (required).
-- ``GMAIL_FROM_NAME``      — display name in the From header (default: ``JobSearcherBot``).
-- ``GMAIL_DEFAULT_TO``     — fallback recipient when the tool is called without ``to`` (default: ``GMAIL_USER``).
-- ``SMTP_HOST``            — SMTP server (default: ``smtp.gmail.com``).
-- ``SMTP_PORT``            — SMTP port over implicit TLS (default: ``465``).
-- ``PORT``                 — HTTP port the MCP server binds (default: ``8090``).
-- ``MCP_PATH``             — HTTP path for the MCP endpoint (default: ``/mcp``).
+Backend selection: ``MAILER_BACKEND`` env var (``smtp`` | ``resend``). When
+unset, Resend wins if ``RESEND_API_KEY`` is present; otherwise SMTP is used.
+
+Per-backend env vars are documented in the README and ``.env.example``.
+
+The MCP server itself binds to ``PORT`` (default 8090) on path ``MCP_PATH``
+(default ``/mcp``) using FastMCP streamable HTTP transport.
 """
 
 from __future__ import annotations
 
 import os
-import smtplib
-import ssl
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 from fastmcp import FastMCP
 
-
-def _require_env(name: str) -> str:
-    value = os.environ.get(name)
-    if not value:
-        raise RuntimeError(f"environment variable {name} is required")
-    return value
+from .backends import load_backend
 
 
-SMTP_HOST = os.environ.get("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
-GMAIL_USER = _require_env("GMAIL_USER")
-GMAIL_APP_PASSWORD = _require_env("GMAIL_APP_PASSWORD")
-DEFAULT_FROM_NAME = os.environ.get("GMAIL_FROM_NAME", "JobSearcherBot")
-DEFAULT_TO = os.environ.get("GMAIL_DEFAULT_TO", GMAIL_USER)
+_backend = load_backend()
+DEFAULT_TO = os.environ.get("MAIL_DEFAULT_TO") or os.environ.get("GMAIL_DEFAULT_TO") or os.environ.get("GMAIL_USER", "")
 
 mcp = FastMCP("gmail-mcp")
 
@@ -51,43 +36,40 @@ def send_email(
     to: str | None = None,
     body_html: str | None = None,
 ) -> dict:
-    """Send an email via Gmail SMTP.
+    """Send an email via the configured backend.
 
     Parameters
     ----------
     subject:
         Email subject line.
     body_markdown:
-        Plain-text / markdown body. Always attached as ``text/plain``.
+        Plain-text / markdown body (always attached as text/plain).
     to:
-        Recipient address. Defaults to ``GMAIL_DEFAULT_TO`` (or ``GMAIL_USER``).
+        Recipient address. Defaults to ``MAIL_DEFAULT_TO`` (or legacy
+        ``GMAIL_DEFAULT_TO`` / ``GMAIL_USER``).
     body_html:
-        Optional ``text/html`` alternative. Mail clients prefer this when present.
+        Optional ``text/html`` alternative.
     """
     recipient = to or DEFAULT_TO
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = f"{DEFAULT_FROM_NAME} <{GMAIL_USER}>"
-    msg["To"] = recipient
-    msg.attach(MIMEText(body_markdown, "plain", "utf-8"))
-    if body_html:
-        msg.attach(MIMEText(body_html, "html", "utf-8"))
-    ctx = ssl.create_default_context()
-    with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT, context=ctx) as conn:
-        conn.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        conn.sendmail(GMAIL_USER, [recipient], msg.as_string())
-    return {"ok": True, "to": recipient, "subject": subject}
+    if not recipient:
+        raise RuntimeError(
+            "no recipient: pass `to` or set MAIL_DEFAULT_TO / GMAIL_DEFAULT_TO env"
+        )
+    return _backend.send(
+        to=recipient,
+        subject=subject,
+        body_text=body_markdown,
+        body_html=body_html,
+    )
 
 
 @mcp.tool()
 def whoami() -> dict:
     """Return the configured sender identity (no secrets)."""
     return {
-        "sender": GMAIL_USER,
-        "from_name": DEFAULT_FROM_NAME,
-        "default_to": DEFAULT_TO,
-        "smtp_host": SMTP_HOST,
-        "smtp_port": SMTP_PORT,
+        "backend": _backend.__class__.__name__,
+        "sender": _backend.sender_label,
+        "default_to": DEFAULT_TO or None,
     }
 
 

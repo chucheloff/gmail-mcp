@@ -1,50 +1,64 @@
 # gmail-mcp
 
-A minimal MCP server that sends email through Gmail SMTP using a Google App
-Password. Designed as the email leg of an LLM agent pipeline (e.g.
-JobSearcherBot) where the agent needs to deliver structured briefings to its
-operator's inbox.
+A minimal MCP server that lets an LLM agent send email. Despite the name, the
+server supports two backends:
 
-Two tools:
+| Backend  | Transport | When to use                                                   |
+| -------- | --------- | ------------------------------------------------------------- |
+| `smtp`   | port 465  | Local dev, or hosts that allow outbound SMTP.                 |
+| `resend` | port 443  | Cloud deployments. Most cloud providers block SMTP by default. |
 
-- `send_email(subject, body_markdown, to=None, body_html=None)` — sends an
-  email. `to` defaults to `GMAIL_DEFAULT_TO` (or the sender address).
-- `whoami()` — returns the configured sender identity (no secrets).
+Two MCP tools exposed over streamable HTTP at `/mcp`:
 
-Transport: streamable HTTP at `/mcp`, port `8090` by default.
+- `send_email(subject, body_markdown, to=None, body_html=None)`
+- `whoami()` — returns active backend + sender identity (no secrets).
 
-## Why SMTP + App Password (not OAuth)
+## Backend selection
 
-For "agent sends mail as me" the App Password path is one secret, no browser
-flow, no refresh-token storage, and the scope is exactly "send mail" — the
-agent can't read the inbox or change labels. If you need read access, swap to
-a Gmail-API MCP server with OAuth instead.
+`MAILER_BACKEND` env (`smtp` | `resend`). When unset, **Resend wins if
+`RESEND_API_KEY` is present, otherwise SMTP.**
 
-## Quick start
+## Quick start — Resend (recommended for cloud)
 
-1. Enable 2-Step Verification on the Gmail account.
-2. Generate an App Password at <https://myaccount.google.com/apppasswords>.
-3. Copy the env template and fill it in:
+1. Sign up at <https://resend.com> (no card on the free tier).
+2. Get an API key from <https://resend.com/api-keys>.
+3. Configure:
 
     ```sh
     cp .env.example .env
-    # edit .env: GMAIL_USER, GMAIL_APP_PASSWORD
+    # set: RESEND_API_KEY, MAIL_DEFAULT_TO
+    # MAILER_BACKEND can stay empty — Resend will be auto-selected.
     ```
 
-4. Start the service:
+4. Start:
 
     ```sh
     docker compose up -d --build
     ```
 
-5. Probe it:
+> **Sandbox sender (`onboarding@resend.dev`) only delivers to the Resend
+> account-owner's verified email.** To send to other recipients, verify a
+> domain at <https://resend.com/domains> and set `RESEND_FROM` to e.g.
+> `"YourBot <bot@yourdomain.tld>"`.
+
+## Quick start — SMTP (local / unblocked hosts)
+
+1. Enable 2-Step Verification on the Gmail account.
+2. Generate an App Password at <https://myaccount.google.com/apppasswords>.
+3. Configure:
 
     ```sh
-    curl -s -X POST http://localhost:8090/mcp \
-      -H 'Content-Type: application/json' \
-      -H 'Accept: application/json, text/event-stream' \
-      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"probe","version":"1"}}}'
+    cp .env.example .env
+    # set: GMAIL_USER, GMAIL_APP_PASSWORD, MAIL_DEFAULT_TO
+    # MAILER_BACKEND=smtp  (or leave empty — SMTP is the fallback)
     ```
+
+4. `docker compose up -d --build`
+
+> **Cloud-host caveat:** DigitalOcean, Linode, Hetzner, AWS EC2 (default), GCP,
+> and Azure all block egress on ports 25/465/587 unless you request an unblock.
+> If `send_email` returns "Network is unreachable", that's the issue —
+> use the Resend backend.
 
 ## Wiring into an OpenClaw agent
 
@@ -54,35 +68,44 @@ openclaw mcp set gmail '{"url":"http://gmail-mcp:8090/mcp","transport":"streamab
 
 Then in any agent run:
 
-> Use the `gmail__send_email` tool to send a test email with subject "ping" and body "hello".
+> Use the `gmail__send_email` tool to send a test email with subject "ping".
 
 ## Environment
 
-| Var                  | Required | Default                | Notes                                    |
-| -------------------- | -------- | ---------------------- | ---------------------------------------- |
-| `GMAIL_USER`         | yes      | —                      | Sender Gmail address.                    |
-| `GMAIL_APP_PASSWORD` | yes      | —                      | 16-char App Password. Spaces stripped.   |
-| `GMAIL_FROM_NAME`    | no       | `JobSearcherBot`       | Display name in `From:` header.          |
-| `GMAIL_DEFAULT_TO`   | no       | `GMAIL_USER`           | Fallback recipient if `to` is omitted.   |
-| `SMTP_HOST`          | no       | `smtp.gmail.com`       |                                          |
-| `SMTP_PORT`          | no       | `465`                  | Implicit TLS.                            |
-| `PORT`               | no       | `8090`                 | HTTP bind port.                          |
-| `MCP_PATH`           | no       | `/mcp`                 | HTTP path for the MCP endpoint.          |
+### Shared
 
-## Development
+| Var                | Required | Default | Notes                                       |
+| ------------------ | -------- | ------- | ------------------------------------------- |
+| `MAILER_BACKEND`   | no       | auto    | `smtp` or `resend`. Auto = `resend` if `RESEND_API_KEY` set. |
+| `MAIL_DEFAULT_TO`  | no       | —       | Fallback recipient. Falls back to `GMAIL_DEFAULT_TO` then `GMAIL_USER`. |
+| `PORT`             | no       | `8090`  | HTTP bind port.                             |
+| `MCP_PATH`         | no       | `/mcp`  | HTTP path for the MCP endpoint.             |
 
-```sh
-pip install -e .
-GMAIL_USER=... GMAIL_APP_PASSWORD=... python -m gmail_mcp.main
-```
+### Resend backend
+
+| Var                       | Required | Default                                  |
+| ------------------------- | -------- | ---------------------------------------- |
+| `RESEND_API_KEY`          | yes      | —                                        |
+| `RESEND_FROM`             | no       | `JobSearcherBot <onboarding@resend.dev>` |
+| `RESEND_TIMEOUT_SECONDS`  | no       | `15`                                     |
+
+### SMTP backend
+
+| Var                  | Required | Default          |
+| -------------------- | -------- | ---------------- |
+| `GMAIL_USER`         | yes      | —                |
+| `GMAIL_APP_PASSWORD` | yes      | —                |
+| `GMAIL_FROM_NAME`    | no       | `JobSearcherBot` |
+| `SMTP_HOST`          | no       | `smtp.gmail.com` |
+| `SMTP_PORT`          | no       | `465`            |
 
 ## Roadmap (open to PRs)
 
 - attachments
 - HTML templates with jinja2
-- DKIM check / send-only health probe
-- per-tool rate limiting (Gmail SMTP caps ~500 sends/day)
-- multi-account support
+- per-tool rate limiting
+- additional backends: SendGrid, Mailgun, AWS SES, Postmark
+- Gmail OAuth2 backend (for true `from: you@gmail.com` without SMTP)
 
 ## License
 
